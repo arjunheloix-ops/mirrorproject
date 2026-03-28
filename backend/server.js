@@ -21,6 +21,9 @@ getDb();
 app.use('/api/auth', authRoutes);
 app.use('/api/videos', videoRoutes);
 
+// Serve uploaded files
+app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
+
 // Serve frontend in production
 const frontendDist = path.join(__dirname, '..', 'frontend', 'dist');
 app.use(express.static(frontendDist));

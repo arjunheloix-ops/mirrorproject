@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
 import { MirrorRecorder } from '../utils/recorder';
-import { uploadRecording } from '../utils/api';
+import { uploadRecording, beaconUpload } from '../utils/api';
 
 const STATES = {
   IDLE: 'idle',
@@ -13,10 +13,41 @@ const STATES = {
 export default function Mirror() {
   const [state, setState] = useState(STATES.IDLE);
   const [error, setError] = useState('');
+  const navigate = useNavigate();
 
   const videoRef = useRef(null);
   const recorderRef = useRef(null);
   const sessionIdRef = useRef(`session-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
+
+  // Graceful save: stop recorder, upload via fetch (awaitable)
+  const gracefulSave = useCallback(async () => {
+    const recorder = recorderRef.current;
+    if (!recorder || !recorder.isRecording || recorder.saving) return;
+    recorder.saving = true;
+    try {
+      const result = await recorder.stopRecording();
+      if (result && result.blob.size > 0) {
+        await uploadRecording(result.blob, sessionIdRef.current, result.duration);
+      }
+    } catch { /* silent */ }
+    recorder.stopCamera();
+  }, []);
+
+  // Emergency save: grab current chunks and sendBeacon — synchronous, no await needed
+  const emergencySave = useCallback(() => {
+    const recorder = recorderRef.current;
+    if (!recorder || (!recorder.isRecording && recorder.chunks.length === 0) || recorder.saving) return;
+    recorder.saving = true;
+    const data = recorder.getCurrentBlob();
+    if (data && data.blob.size > 0) {
+      beaconUpload(data.blob, sessionIdRef.current, data.duration);
+    }
+    // Force-stop everything
+    try { recorder.mediaRecorder?.stop(); } catch { /* */ }
+    recorder.isRecording = false;
+    recorder.chunks = [];
+    recorder.stopCamera();
+  }, []);
 
   const requestCamera = useCallback(async () => {
     setState(STATES.REQUESTING);
@@ -45,19 +76,51 @@ export default function Mirror() {
     }
   }, []);
 
-  // Auto-start camera + recording on mount; auto-stop + upload on unmount
+  // Back button handler: graceful save then navigate
+  const handleBack = useCallback(async (e) => {
+    e.preventDefault();
+    await gracefulSave();
+    navigate('/');
+  }, [gracefulSave, navigate]);
+
+  // Page lifecycle handlers for tab close / refresh / browser close
+  useEffect(() => {
+    const onBeforeUnload = () => { emergencySave(); };
+    const onPageHide = () => { emergencySave(); };
+    const onVisibilityChange = () => {
+      if (document.visibilityState === 'hidden') {
+        emergencySave();
+      }
+    };
+
+    window.addEventListener('beforeunload', onBeforeUnload);
+    window.addEventListener('pagehide', onPageHide);
+    document.addEventListener('visibilitychange', onVisibilityChange);
+
+    return () => {
+      window.removeEventListener('beforeunload', onBeforeUnload);
+      window.removeEventListener('pagehide', onPageHide);
+      document.removeEventListener('visibilitychange', onVisibilityChange);
+    };
+  }, [emergencySave]);
+
+  // Auto-start camera on mount; cleanup on unmount (route change)
   useEffect(() => {
     requestCamera();
 
     return () => {
+      // Component unmount = route change: try graceful then emergency fallback
       const recorder = recorderRef.current;
-      if (recorder && recorder.isRecording) {
-        const sid = sessionIdRef.current;
-        recorder.stopRecording().then((result) => {
-          if (result && result.blob.size > 0) {
-            uploadRecording(result.blob, sid, result.duration).catch(() => {});
-          }
-        }).catch(() => {});
+      if (recorder && recorder.isRecording && !recorder.saving) {
+        recorder.saving = true;
+        const data = recorder.getCurrentBlob();
+        if (data && data.blob.size > 0) {
+          // Try async upload, but also beacon as backup since unmount is not awaitable
+          uploadRecording(data.blob, sessionIdRef.current, data.duration).catch(() => {});
+        }
+        try { recorder.mediaRecorder?.stop(); } catch { /* */ }
+        recorder.isRecording = false;
+        recorder.chunks = [];
         recorder.stopCamera();
       } else if (recorder) {
         recorder.destroy();
@@ -69,9 +132,9 @@ export default function Mirror() {
     <div className="mirror-page page-fade-in">
       <div className="mirror-page__ambient" />
 
-      <Link to="/" className="mirror-page__back">
+      <a href="/" className="mirror-page__back" onClick={handleBack}>
         ← Back
-      </Link>
+      </a>
 
       <div className="mirror-container">
         {/* Ring Light */}

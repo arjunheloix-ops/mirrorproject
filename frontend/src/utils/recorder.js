@@ -5,6 +5,7 @@ export class MirrorRecorder {
     this.chunks = [];
     this.startTime = 0;
     this.isRecording = false;
+    this._saving = false;
   }
 
   async requestCamera() {
@@ -19,6 +20,7 @@ export class MirrorRecorder {
     if (!this.stream) throw new Error('Camera not initialized');
 
     this.chunks = [];
+    this._saving = false;
     const mimeType = MediaRecorder.isTypeSupported('video/webm;codecs=vp9')
       ? 'video/webm;codecs=vp9'
       : MediaRecorder.isTypeSupported('video/webm;codecs=vp8')
@@ -56,6 +58,21 @@ export class MirrorRecorder {
       this.mediaRecorder.stop();
     });
   }
+
+  // Synchronous: build blob from whatever chunks exist right now — for emergency saves
+  getCurrentBlob() {
+    if (this.chunks.length === 0) return null;
+    const mimeType = this.mediaRecorder?.mimeType || 'video/webm';
+    const duration = (Date.now() - this.startTime) / 1000;
+    return {
+      blob: new Blob(this.chunks, { type: mimeType }),
+      duration
+    };
+  }
+
+  // Mark saving in progress to prevent duplicate saves
+  get saving() { return this._saving; }
+  set saving(v) { this._saving = v; }
 
   stopCamera() {
     if (this.stream) {

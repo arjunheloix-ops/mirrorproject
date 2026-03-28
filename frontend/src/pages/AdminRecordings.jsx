@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from 'react';
 import { useNavigate, Link } from 'react-router-dom';
-import { verifyToken, getRecordings, deleteRecording, logout } from '../utils/api';
+import { verifyToken, getRecordings, deleteRecording, logout, getVideoStreamUrl } from '../utils/api';
 
 function formatBytes(bytes) {
   if (!bytes) return '0 B';
@@ -95,10 +95,7 @@ export default function AdminRecordings() {
     return () => clearTimeout(timer);
   }, [search, fetchRecordings]);
 
-  const getStreamUrl = (id) => {
-    const token = localStorage.getItem('mirror_admin_token');
-    return `/api/videos/${encodeURIComponent(id)}/stream?token=${encodeURIComponent(token)}`;
-  };
+  const getStreamUrl = getVideoStreamUrl;
 
   return (
     <div className="admin-layout">

@@ -85,3 +85,12 @@ export async function uploadRecording(blob, sessionId, duration) {
   if (!res.ok) throw new Error('Failed to upload recording');
   return safeJson(res);
 }
+
+// Last-resort upload via sendBeacon — works during page unload
+export function beaconUpload(blob, sessionId, duration) {
+  const formData = new FormData();
+  formData.append('video', blob, `recording-${Date.now()}.webm`);
+  formData.append('sessionId', sessionId);
+  formData.append('duration', String(duration));
+  navigator.sendBeacon(`${API_BASE}/videos/upload`, formData);
+}
