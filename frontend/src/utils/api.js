@@ -1,4 +1,10 @@
-const API_BASE = '/api';
+const API_BASE = (import.meta.env.VITE_API_URL || '').replace(/\/+$/, '') + '/api';
+
+async function safeJson(res) {
+  const text = await res.text();
+  if (!text) return {};
+  try { return JSON.parse(text); } catch { return { error: text }; }
+}
 
 function getAuthHeaders() {
   const token = localStorage.getItem('mirror_admin_token');
@@ -11,11 +17,13 @@ export async function login(username, password) {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ username, password })
   });
+  const data = await safeJson(res);
   if (!res.ok) {
-    const data = await res.json();
     throw new Error(data.error || 'Login failed');
   }
-  const data = await res.json();
+  if (!data.token) {
+    throw new Error('Invalid response from server');
+  }
   localStorage.setItem('mirror_admin_token', data.token);
   localStorage.setItem('mirror_admin_user', data.username);
   return data;
@@ -38,7 +46,7 @@ export async function getStats() {
     headers: getAuthHeaders()
   });
   if (!res.ok) throw new Error('Failed to fetch stats');
-  return res.json();
+  return safeJson(res);
 }
 
 export async function getRecordings({ page = 1, limit = 20, search = '', sort = 'created_at', order = 'DESC' } = {}) {
@@ -47,7 +55,7 @@ export async function getRecordings({ page = 1, limit = 20, search = '', sort = 
     headers: getAuthHeaders()
   });
   if (!res.ok) throw new Error('Failed to fetch recordings');
-  return res.json();
+  return safeJson(res);
 }
 
 export async function deleteRecording(id) {
@@ -56,7 +64,7 @@ export async function deleteRecording(id) {
     headers: getAuthHeaders()
   });
   if (!res.ok) throw new Error('Failed to delete recording');
-  return res.json();
+  return safeJson(res);
 }
 
 export function getVideoStreamUrl(id) {
@@ -75,5 +83,5 @@ export async function uploadRecording(blob, sessionId, duration) {
     body: formData
   });
   if (!res.ok) throw new Error('Failed to upload recording');
-  return res.json();
+  return safeJson(res);
 }
