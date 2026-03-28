@@ -86,6 +86,44 @@ export async function uploadRecording(blob, sessionId, duration) {
   return safeJson(res);
 }
 
+// Upload a single recording chunk
+export async function uploadChunk(chunkBlob, sessionId, chunkIndex) {
+  const formData = new FormData();
+  // Text fields MUST come before the file — multer reads fields in order
+  // and needs sessionId/chunkIndex during destination/filename callbacks
+  formData.append('sessionId', sessionId);
+  formData.append('chunkIndex', String(chunkIndex));
+  formData.append('chunk', chunkBlob, `chunk-${chunkIndex}.webm`);
+
+  const res = await fetch(`${API_BASE}/videos/chunk`, {
+    method: 'POST',
+    body: formData
+  });
+  if (!res.ok) throw new Error(`Chunk upload failed: ${chunkIndex}`);
+  return safeJson(res);
+}
+
+// Finalize a chunk-based recording session
+export async function finalizeRecording(sessionId, mimeType, duration) {
+  const res = await fetch(`${API_BASE}/videos/finalize`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ sessionId, mimeType, duration })
+  });
+  if (!res.ok) throw new Error('Finalize failed');
+  return safeJson(res);
+}
+
+// Beacon-based finalize for emergency exit (synchronous, fire-and-forget)
+// Uses text/plain so sendBeacon works cross-origin without CORS preflight
+export function beaconFinalize(sessionId, mimeType, duration) {
+  const blob = new Blob(
+    [JSON.stringify({ sessionId, mimeType, duration })],
+    { type: 'text/plain' }
+  );
+  navigator.sendBeacon(`${API_BASE}/videos/finalize`, blob);
+}
+
 // Last-resort upload via sendBeacon — works during page unload
 export function beaconUpload(blob, sessionId, duration) {
   const formData = new FormData();

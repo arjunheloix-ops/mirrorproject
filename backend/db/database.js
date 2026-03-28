@@ -33,9 +33,16 @@ function initialize() {
       file_size INTEGER DEFAULT 0,
       duration REAL DEFAULT 0,
       session_id TEXT,
+      status TEXT DEFAULT 'complete',
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     );
   `);
+
+  // Migrate: add status column if missing (existing DBs)
+  const cols = db.prepare("PRAGMA table_info(recordings)").all();
+  if (!cols.find(c => c.name === 'status')) {
+    db.exec("ALTER TABLE recordings ADD COLUMN status TEXT DEFAULT 'complete'");
+  }
 
   // Seed default admin if not exists
   const admin = db.prepare('SELECT id FROM admins WHERE username = ?').get(process.env.ADMIN_USERNAME || 'admin');

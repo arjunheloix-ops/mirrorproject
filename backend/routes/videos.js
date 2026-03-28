@@ -9,8 +9,12 @@ const { authMiddleware } = require('../middleware/auth');
 const router = express.Router();
 
 const UPLOADS_DIR = path.join(__dirname, '..', 'uploads');
+const CHUNKS_DIR = path.join(UPLOADS_DIR, 'chunks');
 if (!fs.existsSync(UPLOADS_DIR)) {
   fs.mkdirSync(UPLOADS_DIR, { recursive: true });
+}
+if (!fs.existsSync(CHUNKS_DIR)) {
+  fs.mkdirSync(CHUNKS_DIR, { recursive: true });
 }
 
 const storage = multer.diskStorage({
@@ -35,7 +39,117 @@ const upload = multer({
   }
 });
 
-// POST /api/videos/upload - Public endpoint for mirror recording
+// Chunk upload storage — each chunk goes into uploads/chunks/{sessionId}/
+const chunkStorage = multer.diskStorage({
+  destination: (req, file, cb) => {
+    const sessionId = req.body.sessionId || req.query.sessionId;
+    if (!sessionId || !/^[a-zA-Z0-9_-]+$/.test(sessionId)) {
+      return cb(new Error('Invalid sessionId'));
+    }
+    const sessionDir = path.join(CHUNKS_DIR, sessionId);
+    fs.mkdirSync(sessionDir, { recursive: true });
+    cb(null, sessionDir);
+  },
+  filename: (req, file, cb) => {
+    const idx = parseInt(req.body.chunkIndex ?? req.query.chunkIndex, 10);
+    if (isNaN(idx) || idx < 0) return cb(new Error('Invalid chunkIndex'));
+    cb(null, `chunk-${String(idx).padStart(6, '0')}.webm`);
+  }
+});
+
+const chunkUpload = multer({
+  storage: chunkStorage,
+  limits: { fileSize: 10 * 1024 * 1024 } // 10MB per chunk
+});
+
+// POST /api/videos/chunk — upload a single recording chunk (public)
+router.post('/chunk', chunkUpload.single('chunk'), (req, res) => {
+  if (!req.file) {
+    return res.status(400).json({ error: 'No chunk provided' });
+  }
+  res.json({ success: true, chunkIndex: req.body.chunkIndex });
+});
+
+// POST /api/videos/finalize — combine chunks into final video, create DB entry (public)
+// Accepts both application/json and text/plain (sendBeacon sends text/plain on some browsers)
+router.post('/finalize', express.json(), express.text(), (req, res) => {
+  let body = req.body;
+  if (typeof body === 'string') {
+    try { body = JSON.parse(body); } catch { return res.status(400).json({ error: 'Invalid JSON' }); }
+  }
+  const { sessionId, mimeType, duration } = body || {};
+  if (!sessionId || !/^[a-zA-Z0-9_-]+$/.test(sessionId)) {
+    return res.status(400).json({ error: 'Invalid sessionId' });
+  }
+
+  const sessionDir = path.join(CHUNKS_DIR, sessionId);
+  if (!fs.existsSync(sessionDir)) {
+    return res.status(404).json({ error: 'No chunks found for session' });
+  }
+
+  // Check if already finalized (prevent duplicate)
+  const db = getDb();
+  const existing = db.prepare('SELECT id FROM recordings WHERE session_id = ? AND status = ?').get(sessionId, 'complete');
+  if (existing) {
+    // Already finalized, clean up chunks dir if it still exists
+    fs.rmSync(sessionDir, { recursive: true, force: true });
+    return res.json({ success: true, id: existing.id, duplicate: true });
+  }
+
+  // Read and sort chunk files
+  const chunkFiles = fs.readdirSync(sessionDir)
+    .filter(f => f.startsWith('chunk-') && f.endsWith('.webm'))
+    .sort();
+
+  if (chunkFiles.length === 0) {
+    return res.status(400).json({ error: 'No chunk files found' });
+  }
+
+  // Concatenate chunks into final file
+  const id = uuidv4();
+  const finalFilename = `${id}.webm`;
+  const finalPath = path.join(UPLOADS_DIR, finalFilename);
+  const writeStream = fs.createWriteStream(finalPath);
+
+  for (const chunkFile of chunkFiles) {
+    const chunkPath = path.join(sessionDir, chunkFile);
+    const data = fs.readFileSync(chunkPath);
+    writeStream.write(data);
+  }
+  writeStream.end();
+
+  writeStream.on('finish', () => {
+    const stat = fs.statSync(finalPath);
+    const dur = parseFloat(duration) || 0;
+
+    // Remove any partial DB entry for this session
+    db.prepare('DELETE FROM recordings WHERE session_id = ? AND status = ?').run(sessionId, 'partial');
+
+    db.prepare(`
+      INSERT INTO recordings (id, filename, original_name, mime_type, file_size, duration, session_id, status)
+      VALUES (?, ?, ?, ?, ?, ?, ?, 'complete')
+    `).run(
+      id,
+      finalFilename,
+      `recording-${sessionId}.webm`,
+      mimeType || 'video/webm',
+      stat.size,
+      dur,
+      sessionId
+    );
+
+    // Clean up chunks directory
+    fs.rmSync(sessionDir, { recursive: true, force: true });
+
+    res.json({ success: true, id, sessionId });
+  });
+
+  writeStream.on('error', (err) => {
+    res.status(500).json({ error: 'Failed to assemble video' });
+  });
+});
+
+// POST /api/videos/upload - Legacy full-blob upload (public)
 router.post('/upload', upload.single('video'), (req, res) => {
   if (!req.file) {
     return res.status(400).json({ error: 'No video file provided' });
@@ -47,8 +161,8 @@ router.post('/upload', upload.single('video'), (req, res) => {
   const duration = parseFloat(req.body.duration) || 0;
 
   db.prepare(`
-    INSERT INTO recordings (id, filename, original_name, mime_type, file_size, duration, session_id)
-    VALUES (?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO recordings (id, filename, original_name, mime_type, file_size, duration, session_id, status)
+    VALUES (?, ?, ?, ?, ?, ?, ?, 'complete')
   `).run(
     id,
     req.file.filename,

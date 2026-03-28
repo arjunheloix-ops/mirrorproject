@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
-import { Link, useNavigate } from 'react-router-dom';
+import { useNavigate } from 'react-router-dom';
 import { MirrorRecorder } from '../utils/recorder';
-import { uploadRecording, beaconUpload } from '../utils/api';
+import { uploadChunk, finalizeRecording, beaconFinalize } from '../utils/api';
 
 const STATES = {
   IDLE: 'idle',
@@ -18,41 +18,71 @@ export default function Mirror() {
   const videoRef = useRef(null);
   const recorderRef = useRef(null);
   const sessionIdRef = useRef(`session-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
+  const finalizedRef = useRef(false);
+  const uploadQueueRef = useRef(Promise.resolve());
+  const uploadedCountRef = useRef(0);
 
-  // Graceful save: stop recorder, upload via fetch (awaitable)
-  const gracefulSave = useCallback(async () => {
+  // Queue a chunk upload — sequential queue so chunks arrive in order
+  const queueChunkUpload = useCallback((chunkBlob, chunkIndex) => {
+    const sid = sessionIdRef.current;
+    uploadQueueRef.current = uploadQueueRef.current
+      .then(() => uploadChunk(chunkBlob, sid, chunkIndex))
+      .then(() => { uploadedCountRef.current = chunkIndex + 1; })
+      .catch(() => {
+        // Retry once on failure
+        return uploadChunk(chunkBlob, sid, chunkIndex)
+          .then(() => { uploadedCountRef.current = chunkIndex + 1; })
+          .catch(() => { /* chunk lost — rest of recording is still safe */ });
+      });
+  }, []);
+
+  // Graceful finalize: stop recorder, wait for pending chunks, then finalize
+  const gracefulFinalize = useCallback(async () => {
+    if (finalizedRef.current) return;
     const recorder = recorderRef.current;
-    if (!recorder || !recorder.isRecording || recorder.saving) return;
-    recorder.saving = true;
+    if (!recorder || !recorder.isRecording) return;
+    finalizedRef.current = true;
+
     try {
+      // Stop MediaRecorder — triggers final ondataavailable then onstop
       const result = await recorder.stopRecording();
-      if (result && result.blob.size > 0) {
-        await uploadRecording(result.blob, sessionIdRef.current, result.duration);
+      // Wait for all queued chunk uploads to finish
+      await uploadQueueRef.current;
+      // Finalize on backend
+      if (uploadedCountRef.current > 0 && result) {
+        await finalizeRecording(sessionIdRef.current, recorder.mimeType, result.duration);
       }
     } catch { /* silent */ }
     recorder.stopCamera();
   }, []);
 
-  // Emergency save: grab current chunks and sendBeacon — synchronous, no await needed
-  const emergencySave = useCallback(() => {
+  // Emergency finalize: sendBeacon for finalize (chunks already on server)
+  const emergencyFinalize = useCallback(() => {
+    if (finalizedRef.current) return;
     const recorder = recorderRef.current;
-    if (!recorder || (!recorder.isRecording && recorder.chunks.length === 0) || recorder.saving) return;
-    recorder.saving = true;
-    const data = recorder.getCurrentBlob();
-    if (data && data.blob.size > 0) {
-      beaconUpload(data.blob, sessionIdRef.current, data.duration);
+    if (!recorder || !recorder.isRecording) return;
+    finalizedRef.current = true;
+
+    const duration = recorder.getDuration();
+    const mimeType = recorder.mimeType || 'video/webm';
+
+    // Fire finalize via sendBeacon — chunks already saved server-side
+    if (uploadedCountRef.current > 0) {
+      beaconFinalize(sessionIdRef.current, mimeType, duration);
     }
+
     // Force-stop everything
     try { recorder.mediaRecorder?.stop(); } catch { /* */ }
     recorder.isRecording = false;
-    recorder.chunks = [];
     recorder.stopCamera();
   }, []);
 
   const requestCamera = useCallback(async () => {
     setState(STATES.REQUESTING);
     try {
-      const recorder = new MirrorRecorder();
+      const recorder = new MirrorRecorder({
+        onChunk: (blob, index) => queueChunkUpload(blob, index)
+      });
       const stream = await recorder.requestCamera();
       recorderRef.current = recorder;
 
@@ -74,22 +104,22 @@ export default function Mirror() {
       );
       setState(STATES.ERROR);
     }
-  }, []);
+  }, [queueChunkUpload]);
 
-  // Back button handler: graceful save then navigate
+  // Back button handler: graceful finalize then navigate
   const handleBack = useCallback(async (e) => {
     e.preventDefault();
-    await gracefulSave();
+    await gracefulFinalize();
     navigate('/');
-  }, [gracefulSave, navigate]);
+  }, [gracefulFinalize, navigate]);
 
-  // Page lifecycle handlers for tab close / refresh / browser close
+  // Page lifecycle handlers for tab close / refresh / app switch
   useEffect(() => {
-    const onBeforeUnload = () => { emergencySave(); };
-    const onPageHide = () => { emergencySave(); };
+    const onBeforeUnload = () => { emergencyFinalize(); };
+    const onPageHide = () => { emergencyFinalize(); };
     const onVisibilityChange = () => {
       if (document.visibilityState === 'hidden') {
-        emergencySave();
+        emergencyFinalize();
       }
     };
 
@@ -102,28 +132,30 @@ export default function Mirror() {
       window.removeEventListener('pagehide', onPageHide);
       document.removeEventListener('visibilitychange', onVisibilityChange);
     };
-  }, [emergencySave]);
+  }, [emergencyFinalize]);
 
   // Auto-start camera on mount; cleanup on unmount (route change)
   useEffect(() => {
     requestCamera();
 
     return () => {
-      // Component unmount = route change: try graceful then emergency fallback
-      const recorder = recorderRef.current;
-      if (recorder && recorder.isRecording && !recorder.saving) {
-        recorder.saving = true;
-        const data = recorder.getCurrentBlob();
-        if (data && data.blob.size > 0) {
-          // Try async upload, but also beacon as backup since unmount is not awaitable
-          uploadRecording(data.blob, sessionIdRef.current, data.duration).catch(() => {});
+      // Component unmount = route change
+      if (!finalizedRef.current) {
+        const recorder = recorderRef.current;
+        if (recorder && recorder.isRecording) {
+          finalizedRef.current = true;
+          const duration = recorder.getDuration();
+          const mimeType = recorder.mimeType || 'video/webm';
+          try { recorder.mediaRecorder?.stop(); } catch { /* */ }
+          recorder.isRecording = false;
+          // Finalize via beacon since unmount is synchronous
+          if (uploadedCountRef.current > 0) {
+            beaconFinalize(sessionIdRef.current, mimeType, duration);
+          }
+          recorder.stopCamera();
+        } else if (recorder) {
+          recorder.destroy();
         }
-        try { recorder.mediaRecorder?.stop(); } catch { /* */ }
-        recorder.isRecording = false;
-        recorder.chunks = [];
-        recorder.stopCamera();
-      } else if (recorder) {
-        recorder.destroy();
       }
     };
   }, [requestCamera]);

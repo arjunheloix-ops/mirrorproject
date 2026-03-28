@@ -1,11 +1,12 @@
 export class MirrorRecorder {
-  constructor() {
+  constructor({ onChunk } = {}) {
     this.stream = null;
     this.mediaRecorder = null;
-    this.chunks = [];
     this.startTime = 0;
     this.isRecording = false;
     this._saving = false;
+    this._chunkIndex = 0;
+    this._onChunk = onChunk || null;
   }
 
   async requestCamera() {
@@ -19,27 +20,32 @@ export class MirrorRecorder {
   startRecording() {
     if (!this.stream) throw new Error('Camera not initialized');
 
-    this.chunks = [];
     this._saving = false;
+    this._chunkIndex = 0;
     const mimeType = MediaRecorder.isTypeSupported('video/webm;codecs=vp9')
       ? 'video/webm;codecs=vp9'
       : MediaRecorder.isTypeSupported('video/webm;codecs=vp8')
         ? 'video/webm;codecs=vp8'
         : 'video/webm';
 
+    this.mimeType = mimeType;
     this.mediaRecorder = new MediaRecorder(this.stream, { mimeType });
 
     this.mediaRecorder.ondataavailable = (e) => {
       if (e.data && e.data.size > 0) {
-        this.chunks.push(e.data);
+        const idx = this._chunkIndex++;
+        if (this._onChunk) {
+          this._onChunk(e.data, idx);
+        }
       }
     };
 
     this.startTime = Date.now();
-    this.mediaRecorder.start(1000); // collect data every second
+    this.mediaRecorder.start(1000); // emit chunk every second
     this.isRecording = true;
   }
 
+  // Stop recording gracefully and return duration info
   stopRecording() {
     return new Promise((resolve) => {
       if (!this.mediaRecorder || this.mediaRecorder.state === 'inactive') {
@@ -49,28 +55,18 @@ export class MirrorRecorder {
 
       this.mediaRecorder.onstop = () => {
         const duration = (Date.now() - this.startTime) / 1000;
-        const blob = new Blob(this.chunks, { type: this.mediaRecorder.mimeType });
         this.isRecording = false;
-        this.chunks = [];
-        resolve({ blob, duration });
+        resolve({ duration, mimeType: this.mimeType });
       };
 
       this.mediaRecorder.stop();
     });
   }
 
-  // Synchronous: build blob from whatever chunks exist right now — for emergency saves
-  getCurrentBlob() {
-    if (this.chunks.length === 0) return null;
-    const mimeType = this.mediaRecorder?.mimeType || 'video/webm';
-    const duration = (Date.now() - this.startTime) / 1000;
-    return {
-      blob: new Blob(this.chunks, { type: mimeType }),
-      duration
-    };
+  getDuration() {
+    return (Date.now() - this.startTime) / 1000;
   }
 
-  // Mark saving in progress to prevent duplicate saves
   get saving() { return this._saving; }
   set saving(v) { this._saving = v; }
 
@@ -83,9 +79,8 @@ export class MirrorRecorder {
 
   destroy() {
     if (this.isRecording) {
-      this.mediaRecorder?.stop();
+      try { this.mediaRecorder?.stop(); } catch { /* */ }
     }
     this.stopCamera();
-    this.chunks = [];
   }
 }
