@@ -12,6 +12,8 @@ function getDb() {
     db.pragma('journal_mode = WAL');
     db.pragma('foreign_keys = ON');
     initialize();
+    const count = db.prepare('SELECT COUNT(*) as c FROM recordings').get().c;
+    console.log(`[db] Opened database at ${DB_PATH} — ${count} recording(s) found`);
   }
   return db;
 }

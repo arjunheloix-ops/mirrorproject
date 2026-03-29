@@ -65,8 +65,10 @@ const chunkUpload = multer({
 // POST /api/videos/chunk — upload a single recording chunk (public)
 router.post('/chunk', chunkUpload.single('chunk'), (req, res) => {
   if (!req.file) {
+    console.warn('[chunk] No chunk file in request', { sessionId: req.body.sessionId, chunkIndex: req.body.chunkIndex });
     return res.status(400).json({ error: 'No chunk provided' });
   }
+  console.log('[chunk] Saved chunk', { sessionId: req.body.sessionId, chunkIndex: req.body.chunkIndex, size: req.file.size });
   res.json({ success: true, chunkIndex: req.body.chunkIndex });
 });
 
@@ -91,6 +93,7 @@ router.post('/finalize', express.json(), express.text(), (req, res) => {
   const db = getDb();
   const existing = db.prepare('SELECT id FROM recordings WHERE session_id = ? AND status = ?').get(sessionId, 'complete');
   if (existing) {
+    console.log('[finalize] Duplicate finalize skipped', { sessionId, existingId: existing.id });
     // Already finalized, clean up chunks dir if it still exists
     fs.rmSync(sessionDir, { recursive: true, force: true });
     return res.json({ success: true, id: existing.id, duplicate: true });
@@ -123,7 +126,10 @@ router.post('/finalize', express.json(), express.text(), (req, res) => {
     const dur = parseFloat(duration) || 0;
 
     // Remove any partial DB entry for this session
-    db.prepare('DELETE FROM recordings WHERE session_id = ? AND status = ?').run(sessionId, 'partial');
+    const deleted = db.prepare('DELETE FROM recordings WHERE session_id = ? AND status = ?').run(sessionId, 'partial');
+    if (deleted.changes > 0) {
+      console.log('[finalize] Removed partial entry', { sessionId, deletedCount: deleted.changes });
+    }
 
     db.prepare(`
       INSERT INTO recordings (id, filename, original_name, mime_type, file_size, duration, session_id, status)
@@ -138,6 +144,8 @@ router.post('/finalize', express.json(), express.text(), (req, res) => {
       sessionId
     );
 
+    console.log('[finalize] Recording created', { id, sessionId, fileSize: stat.size, duration: dur, chunks: chunkFiles.length });
+
     // Clean up chunks directory
     fs.rmSync(sessionDir, { recursive: true, force: true });
 
@@ -145,6 +153,7 @@ router.post('/finalize', express.json(), express.text(), (req, res) => {
   });
 
   writeStream.on('error', (err) => {
+    console.error('[finalize] Failed to assemble video', { sessionId, error: err.message });
     res.status(500).json({ error: 'Failed to assemble video' });
   });
 });
@@ -173,6 +182,7 @@ router.post('/upload', upload.single('video'), (req, res) => {
     sessionId
   );
 
+  console.log('[upload] Recording created (legacy)', { id, sessionId, fileSize: req.file.size, duration });
   res.json({ success: true, id, sessionId });
 });
 
@@ -199,6 +209,7 @@ router.get('/', authMiddleware, (req, res) => {
     `SELECT * FROM recordings ${where} ORDER BY ${sortCol} ${sortOrder} LIMIT ? OFFSET ?`
   ).all(...params, parseInt(limit), offset);
 
+  console.log('[list] Recordings fetched', { total, returned: recordings.length, page: parseInt(page), limit: parseInt(limit), search: search || null });
   res.json({ recordings, total, page: parseInt(page), limit: parseInt(limit) });
 });
 
@@ -212,6 +223,7 @@ router.get('/stats', authMiddleware, (req, res) => {
     "SELECT COUNT(*) as count FROM recordings WHERE date(created_at) = date('now')"
   ).get().count;
 
+  console.log('[stats] Dashboard stats', { total, totalSize, totalDuration, today });
   res.json({ total, totalSize, totalDuration, today });
 });
 
@@ -269,6 +281,7 @@ router.delete('/:id', authMiddleware, (req, res) => {
   }
 
   db.prepare('DELETE FROM recordings WHERE id = ?').run(req.params.id);
+  console.log('[delete] Recording deleted', { id: req.params.id, filename: recording.filename });
   res.json({ success: true });
 });
 

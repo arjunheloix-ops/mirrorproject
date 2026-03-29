@@ -2,3 +2,10 @@ node_modules
 dist
 .env
 .vercel
+
+# Runtime data — NEVER commit these; deploys will overwrite production data
+backend/db/*.db
+backend/db/*.db-wal
+backend/db/*.db-shm
+backend/uploads/*.webm
+backend/uploads/chunks/
